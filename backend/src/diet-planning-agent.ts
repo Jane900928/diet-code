@@ -1,8 +1,12 @@
+// 禁用 Mastra 遥测警告
+globalThis.___MASTRA_TELEMETRY___ = true;
+
 // 安装依赖
 // npm install @mastra/core dotenv
 
 // diet-planning-agent.ts
-import { Mastra, Agent, Tool } from '@mastra/core';
+import { Mastra, Agent } from '@mastra/core';
+import { Tool } from '@mastra/core/tools';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -70,6 +74,7 @@ class SimpleMemoryStore {
 class DietPlanningAgent {
   private mastra: Mastra;
   private memoryStore: SimpleMemoryStore;
+  private agent: Agent | null = null;
 
   constructor() {
     // 检查 OpenAI API Key
@@ -93,175 +98,200 @@ class DietPlanningAgent {
   }
 
   private setupAgent() {
-    // 创建计算基础代谢率的工具
-    const calculateBMRTool = new Tool({
-      name: 'calculateBMR',
-      description: '计算用户的基础代谢率（BMR）',
-      parameters: {
-        type: 'object',
-        properties: {
-          age: { type: 'number' },
-          gender: { type: 'string', enum: ['male', 'female'] },
-          weight: { type: 'number' },
-          height: { type: 'number' },
-          activityLevel: { 
-            type: 'string', 
-            enum: ['sedentary', 'light', 'moderate', 'very_active', 'extra_active'] 
-          },
-        },
-        required: ['age', 'gender', 'weight', 'height', 'activityLevel'],
-      },
-      handler: async (params: any) => {
-        const { age, gender, weight, height, activityLevel } = params;
-        console.log('计算 BMR，参数:', params);
-        
-        // 使用 Harris-Benedict 公式计算 BMR
-        let bmr: number;
-        if (gender === 'male') {
-          bmr = 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age);
-        } else {
-          bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age);
-        }
-
-        // 根据活动水平调整
-        const activityMultipliers = {
-          sedentary: 1.2,
-          light: 1.375,
-          moderate: 1.55,
-          very_active: 1.725,
-          extra_active: 1.9,
-        };
-
-        const totalCalories = bmr * activityMultipliers[activityLevel as keyof typeof activityMultipliers];
-        
-        const result = {
-          bmr: Math.round(bmr),
-          totalCaloriesNeeded: Math.round(totalCalories),
-        };
-
-        console.log('BMR 计算结果:', result);
-        return result;
-      },
-    });
-
-    // 创建生成餐食建议的工具
-    const generateMealTool = new Tool({
-      name: 'generateMeal',
-      description: '基于用户偏好生成餐食建议',
-      parameters: {
-        type: 'object',
-        properties: {
-          mealType: { type: 'string', enum: ['breakfast', 'lunch', 'dinner', 'snack'] },
-          calories: { type: 'number' },
-          dietaryRestrictions: { type: 'array', items: { type: 'string' } },
-          allergies: { type: 'array', items: { type: 'string' } },
-          preferences: { type: 'array', items: { type: 'string' } },
-        },
-        required: ['mealType', 'calories'],
-      },
-      handler: async (params: any) => {
-        const { mealType, calories, dietaryRestrictions = [], allergies = [], preferences = [] } = params;
-        console.log('生成餐食，参数:', params);
-        
-        const mealTemplates = this.getMealTemplates(mealType, dietaryRestrictions, allergies);
-        const selectedMeal = this.selectMealBasedOnCalories(mealTemplates, calories);
-        
-        console.log('生成的餐食:', selectedMeal.name);
-        return selectedMeal;
-      },
-    });
-
-    // 创建保存用户偏好的工具
-    const saveUserPreferencesTool = new Tool({
-      name: 'saveUserPreferences',
-      description: '保存用户的饮食偏好和健康信息',
-      parameters: {
-        type: 'object',
-        properties: {
-          userId: { type: 'string' },
-          preferences: { type: 'object' },
-        },
-        required: ['userId', 'preferences'],
-      },
-      handler: async (params: any) => {
-        const { userId, preferences } = params;
-        console.log('保存用户偏好:', userId);
-        await this.memoryStore.store(`user_preferences_${userId}`, preferences);
-        return { success: true, message: '用户偏好已保存' };
-      },
-    });
-
-    // 创建获取用户偏好的工具
-    const getUserPreferencesTool = new Tool({
-      name: 'getUserPreferences',
-      description: '获取用户的饮食偏好和健康信息',
-      parameters: {
-        type: 'object',
-        properties: {
-          userId: { type: 'string' },
-        },
-        required: ['userId'],
-      },
-      handler: async (params: any) => {
-        const { userId } = params;
-        console.log('获取用户偏好:', userId);
-        const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`);
-        return preferences || null;
-      },
-    });
-
-    // 创建生成完整饮食计划的工具
-    const generateDietPlanTool = new Tool({
-      name: 'generateDietPlan',
-      description: '为用户生成完整的日常饮食计划',
-      parameters: {
-        type: 'object',
-        properties: {
-          userId: { type: 'string' },
-          days: { type: 'number', default: 7 },
-          startDate: { type: 'string' },
-        },
-        required: ['userId'],
-      },
-      handler: async (params: any) => {
-        const { userId, days = 7, startDate = new Date().toISOString().split('T')[0] } = params;
-        console.log('生成饮食计划:', { userId, days, startDate });
-        
-        const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`) as UserPreferences;
-        if (!preferences) {
-          return { error: '请先设置用户偏好信息' };
-        }
-
-        const bmrData = await calculateBMRTool.handler(preferences);
-        const dailyCalories = bmrData.totalCaloriesNeeded;
-
-        const dietPlan = [];
-        for (let i = 0; i < days; i++) {
-          const date = new Date(startDate);
-          date.setDate(date.getDate() + i);
-          
-          const dayPlan = await this.generateDayPlan(dailyCalories, preferences, date.toISOString().split('T')[0]);
-          dietPlan.push(dayPlan);
-        }
-
-        // 保存饮食计划
-        await this.memoryStore.store(`diet_plan_${userId}`, dietPlan);
-        
-        console.log(`生成了 ${days} 天的饮食计划`);
-        return dietPlan;
-      },
-    });
-
     try {
-      // 注册所有工具
-      this.mastra.registerTool(calculateBMRTool);
-      this.mastra.registerTool(generateMealTool);
-      this.mastra.registerTool(saveUserPreferencesTool);
-      this.mastra.registerTool(getUserPreferencesTool);
-      this.mastra.registerTool(generateDietPlanTool);
+      // 创建计算基础代谢率的工具
+      const calculateBMRTool = new Tool({
+        id: 'calculateBMR',
+        description: '计算用户的基础代谢率（BMR）',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            age: { type: 'number' },
+            gender: { type: 'string', enum: ['male', 'female'] },
+            weight: { type: 'number' },
+            height: { type: 'number' },
+            activityLevel: { 
+              type: 'string', 
+              enum: ['sedentary', 'light', 'moderate', 'very_active', 'extra_active'] 
+            },
+          },
+          required: ['age', 'gender', 'weight', 'height', 'activityLevel'],
+        },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            bmr: { type: 'number' },
+            totalCaloriesNeeded: { type: 'number' }
+          }
+        },
+        execute: async (params: any) => {
+          const { age, gender, weight, height, activityLevel } = params;
+          console.log('计算 BMR，参数:', params);
+          
+          // 使用 Harris-Benedict 公式计算 BMR
+          let bmr: number;
+          if (gender === 'male') {
+            bmr = 88.362 + (13.397 * weight) + (4.799 * height) - (5.677 * age);
+          } else {
+            bmr = 447.593 + (9.247 * weight) + (3.098 * height) - (4.330 * age);
+          }
+
+          // 根据活动水平调整
+          const activityMultipliers = {
+            sedentary: 1.2,
+            light: 1.375,
+            moderate: 1.55,
+            very_active: 1.725,
+            extra_active: 1.9,
+          };
+
+          const totalCalories = bmr * activityMultipliers[activityLevel as keyof typeof activityMultipliers];
+          
+          const result = {
+            bmr: Math.round(bmr),
+            totalCaloriesNeeded: Math.round(totalCalories),
+          };
+
+          console.log('BMR 计算结果:', result);
+          return result;
+        },
+      });
+
+      // 创建生成餐食建议的工具
+      const generateMealTool = new Tool({
+        id: 'generateMeal',
+        description: '基于用户偏好生成餐食建议',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            mealType: { type: 'string', enum: ['breakfast', 'lunch', 'dinner', 'snack'] },
+            calories: { type: 'number' },
+            dietaryRestrictions: { type: 'array', items: { type: 'string' } },
+            allergies: { type: 'array', items: { type: 'string' } },
+            preferences: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['mealType', 'calories'],
+        },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            name: { type: 'string' },
+            type: { type: 'string' },
+            ingredients: { type: 'array', items: { type: 'string' } },
+            nutrition: { type: 'object' },
+            prepTime: { type: 'number' },
+            instructions: { type: 'array', items: { type: 'string' } }
+          }
+        },
+        execute: async (params: any) => {
+          const { mealType, calories, dietaryRestrictions = [], allergies = [], preferences = [] } = params;
+          console.log('生成餐食，参数:', params);
+          
+          const mealTemplates = this.getMealTemplates(mealType, dietaryRestrictions, allergies);
+          const selectedMeal = this.selectMealBasedOnCalories(mealTemplates, calories);
+          
+          console.log('生成的餐食:', selectedMeal.name);
+          return selectedMeal;
+        },
+      });
+
+      // 创建保存用户偏好的工具
+      const saveUserPreferencesTool = new Tool({
+        id: 'saveUserPreferences',
+        description: '保存用户的饮食偏好和健康信息',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string' },
+            preferences: { type: 'object' },
+          },
+          required: ['userId', 'preferences'],
+        },
+        outputSchema: {
+          type: 'object',
+          properties: {
+            success: { type: 'boolean' },
+            message: { type: 'string' }
+          }
+        },
+        execute: async (params: any) => {
+          const { userId, preferences } = params;
+          console.log('保存用户偏好:', userId);
+          await this.memoryStore.store(`user_preferences_${userId}`, preferences);
+          return { success: true, message: '用户偏好已保存' };
+        },
+      });
+
+      // 创建获取用户偏好的工具
+      const getUserPreferencesTool = new Tool({
+        id: 'getUserPreferences',
+        description: '获取用户的饮食偏好和健康信息',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string' },
+          },
+          required: ['userId'],
+        },
+        outputSchema: {
+          type: 'object'
+        },
+        execute: async (params: any) => {
+          const { userId } = params;
+          console.log('获取用户偏好:', userId);
+          const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`);
+          return preferences || null;
+        },
+      });
+
+      // 创建生成完整饮食计划的工具
+      const generateDietPlanTool = new Tool({
+        id: 'generateDietPlan',
+        description: '为用户生成完整的日常饮食计划',
+        inputSchema: {
+          type: 'object',
+          properties: {
+            userId: { type: 'string' },
+            days: { type: 'number', default: 7 },
+            startDate: { type: 'string' },
+          },
+          required: ['userId'],
+        },
+        outputSchema: {
+          type: 'array',
+          items: { type: 'object' }
+        },
+        execute: async (params: any) => {
+          const { userId, days = 7, startDate = new Date().toISOString().split('T')[0] } = params;
+          console.log('生成饮食计划:', { userId, days, startDate });
+          
+          const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`) as UserPreferences;
+          if (!preferences) {
+            return { error: '请先设置用户偏好信息' };
+          }
+
+          const bmrData = await calculateBMRTool.execute(preferences);
+          const dailyCalories = bmrData.totalCaloriesNeeded;
+
+          const dietPlan = [];
+          for (let i = 0; i < days; i++) {
+            const date = new Date(startDate);
+            date.setDate(date.getDate() + i);
+            
+            const dayPlan = await this.generateDayPlan(dailyCalories, preferences, date.toISOString().split('T')[0]);
+            dietPlan.push(dayPlan);
+          }
+
+          // 保存饮食计划
+          await this.memoryStore.store(`diet_plan_${userId}`, dietPlan);
+          
+          console.log(`生成了 ${days} 天的饮食计划`);
+          return dietPlan;
+        },
+      });
 
       // 创建主 Agent
-      this.mastra.createAgent({
+      this.agent = new Agent({
         name: 'dietPlanningAgent',
         instructions: `
           你是一个专业的饮食规划助手。你的主要职责是：
@@ -274,6 +304,13 @@ class DietPlanningAgent {
           请始终保持友好、专业的态度，并确保所有建议都基于健康的营养学原理。
           如果用户有特殊的健康状况，建议他们咨询专业的营养师或医生。
         `,
+        model: {
+          provider: 'openai',
+          name: 'gpt-4',
+          config: {
+            apiKey: process.env.OPENAI_API_KEY || 'demo-key',
+          },
+        },
         tools: [
           calculateBMRTool,
           generateMealTool,
@@ -536,9 +573,8 @@ class DietPlanningAgent {
   // 处理用户消息
   public async handleUserMessage(userId: string, message: string) {
     try {
-      const agent = this.mastra.getAgent('dietPlanningAgent');
-      if (!agent) {
-        throw new Error('Agent 未找到');
+      if (!this.agent) {
+        throw new Error('Agent 未初始化');
       }
 
       console.log(`处理用户 ${userId} 的消息: ${message}`);
@@ -548,7 +584,7 @@ class DietPlanningAgent {
         return this.generateMockResponse(message);
       }
 
-      const response = await agent.generate([{ role: 'user', content: message }], {
+      const response = await this.agent.generate(message, {
         userId,
       });
 
