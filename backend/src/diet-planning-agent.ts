@@ -1,12 +1,8 @@
-// 禁用 Mastra 遥测警告
-globalThis.___MASTRA_TELEMETRY___ = true;
-
 // 安装依赖
-// npm install @mastra/core @mastra/memory dotenv
+// npm install @mastra/core dotenv
 
 // diet-planning-agent.ts
 import { Mastra, Agent, Tool } from '@mastra/core';
-import { MemoryManager } from '@mastra/memory';
 import * as dotenv from 'dotenv';
 
 dotenv.config();
@@ -50,30 +46,49 @@ interface DietPlan {
   notes: string[];
 }
 
+// 简单的内存存储类
+class SimpleMemoryStore {
+  private storage: Map<string, any> = new Map();
+
+  async store(key: string, value: any): Promise<void> {
+    this.storage.set(key, value);
+    console.log(`Stored data for key: ${key}`);
+  }
+
+  async retrieve(key: string): Promise<any> {
+    const value = this.storage.get(key);
+    console.log(`Retrieved data for key: ${key}:`, value ? 'found' : 'not found');
+    return value;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.storage.delete(key);
+    console.log(`Deleted data for key: ${key}`);
+  }
+}
+
 class DietPlanningAgent {
   private mastra: Mastra;
-  private memoryManager: MemoryManager;
+  private memoryStore: SimpleMemoryStore;
 
   constructor() {
+    // 检查 OpenAI API Key
+    if (!process.env.OPENAI_API_KEY) {
+      console.warn('警告: OPENAI_API_KEY 未设置，某些功能可能无法正常工作');
+    }
+
     this.mastra = new Mastra({
       name: 'diet-planning-agent',
       llm: {
         provider: 'openai',
         name: 'gpt-4',
         config: {
-          apiKey: process.env.OPENAI_API_KEY,
+          apiKey: process.env.OPENAI_API_KEY || 'demo-key',
         },
       },
-      // 禁用遥测功能
-      telemetry: {
-        enabled: false
-      }
     });
 
-    this.memoryManager = new MemoryManager({
-      provider: 'local', // 使用本地存储，生产环境可以切换到数据库
-    });
-
+    this.memoryStore = new SimpleMemoryStore();
     this.setupAgent();
   }
 
@@ -98,6 +113,7 @@ class DietPlanningAgent {
       },
       handler: async (params: any) => {
         const { age, gender, weight, height, activityLevel } = params;
+        console.log('计算 BMR，参数:', params);
         
         // 使用 Harris-Benedict 公式计算 BMR
         let bmr: number;
@@ -118,10 +134,13 @@ class DietPlanningAgent {
 
         const totalCalories = bmr * activityMultipliers[activityLevel as keyof typeof activityMultipliers];
         
-        return {
+        const result = {
           bmr: Math.round(bmr),
           totalCaloriesNeeded: Math.round(totalCalories),
         };
+
+        console.log('BMR 计算结果:', result);
+        return result;
       },
     });
 
@@ -142,12 +161,12 @@ class DietPlanningAgent {
       },
       handler: async (params: any) => {
         const { mealType, calories, dietaryRestrictions = [], allergies = [], preferences = [] } = params;
+        console.log('生成餐食，参数:', params);
         
-        // 这里可以集成食谱 API 或使用预定义的餐食数据库
-        // 为了演示，我们使用简单的餐食模板
         const mealTemplates = this.getMealTemplates(mealType, dietaryRestrictions, allergies);
         const selectedMeal = this.selectMealBasedOnCalories(mealTemplates, calories);
         
+        console.log('生成的餐食:', selectedMeal.name);
         return selectedMeal;
       },
     });
@@ -166,7 +185,8 @@ class DietPlanningAgent {
       },
       handler: async (params: any) => {
         const { userId, preferences } = params;
-        await this.memoryManager.store(`user_preferences_${userId}`, preferences);
+        console.log('保存用户偏好:', userId);
+        await this.memoryStore.store(`user_preferences_${userId}`, preferences);
         return { success: true, message: '用户偏好已保存' };
       },
     });
@@ -184,7 +204,8 @@ class DietPlanningAgent {
       },
       handler: async (params: any) => {
         const { userId } = params;
-        const preferences = await this.memoryManager.retrieve(`user_preferences_${userId}`);
+        console.log('获取用户偏好:', userId);
+        const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`);
         return preferences || null;
       },
     });
@@ -204,8 +225,9 @@ class DietPlanningAgent {
       },
       handler: async (params: any) => {
         const { userId, days = 7, startDate = new Date().toISOString().split('T')[0] } = params;
+        console.log('生成饮食计划:', { userId, days, startDate });
         
-        const preferences = await this.memoryManager.retrieve(`user_preferences_${userId}`) as UserPreferences;
+        const preferences = await this.memoryStore.retrieve(`user_preferences_${userId}`) as UserPreferences;
         if (!preferences) {
           return { error: '请先设置用户偏好信息' };
         }
@@ -223,41 +245,49 @@ class DietPlanningAgent {
         }
 
         // 保存饮食计划
-        await this.memoryManager.store(`diet_plan_${userId}`, dietPlan);
+        await this.memoryStore.store(`diet_plan_${userId}`, dietPlan);
         
+        console.log(`生成了 ${days} 天的饮食计划`);
         return dietPlan;
       },
     });
 
-    // 注册所有工具
-    this.mastra.registerTool(calculateBMRTool);
-    this.mastra.registerTool(generateMealTool);
-    this.mastra.registerTool(saveUserPreferencesTool);
-    this.mastra.registerTool(getUserPreferencesTool);
-    this.mastra.registerTool(generateDietPlanTool);
+    try {
+      // 注册所有工具
+      this.mastra.registerTool(calculateBMRTool);
+      this.mastra.registerTool(generateMealTool);
+      this.mastra.registerTool(saveUserPreferencesTool);
+      this.mastra.registerTool(getUserPreferencesTool);
+      this.mastra.registerTool(generateDietPlanTool);
 
-    // 创建主 Agent
-    this.mastra.createAgent({
-      name: 'dietPlanningAgent',
-      instructions: `
-        你是一个专业的饮食规划助手。你的主要职责是：
-        1. 收集用户的基本健康信息和饮食偏好
-        2. 基于科学的营养学原理计算用户的营养需求
-        3. 生成个性化的饮食计划和餐食建议
-        4. 提供营养均衡、美味且符合用户限制条件的餐食
-        5. 跟踪用户的饮食历史并提供改进建议
+      // 创建主 Agent
+      this.mastra.createAgent({
+        name: 'dietPlanningAgent',
+        instructions: `
+          你是一个专业的饮食规划助手。你的主要职责是：
+          1. 收集用户的基本健康信息和饮食偏好
+          2. 基于科学的营养学原理计算用户的营养需求
+          3. 生成个性化的饮食计划和餐食建议
+          4. 提供营养均衡、美味且符合用户限制条件的餐食
+          5. 跟踪用户的饮食历史并提供改进建议
 
-        请始终保持友好、专业的态度，并确保所有建议都基于健康的营养学原理。
-        如果用户有特殊的健康状况，建议他们咨询专业的营养师或医生。
-      `,
-      tools: [
-        calculateBMRTool,
-        generateMealTool,
-        saveUserPreferencesTool,
-        getUserPreferencesTool,
-        generateDietPlanTool,
-      ],
-    });
+          请始终保持友好、专业的态度，并确保所有建议都基于健康的营养学原理。
+          如果用户有特殊的健康状况，建议他们咨询专业的营养师或医生。
+        `,
+        tools: [
+          calculateBMRTool,
+          generateMealTool,
+          saveUserPreferencesTool,
+          getUserPreferencesTool,
+          generateDietPlanTool,
+        ],
+      });
+
+      console.log('Agent 设置完成');
+    } catch (error) {
+      console.error('设置 Agent 时出错:', error);
+      throw error;
+    }
   }
 
   // 生成一天的饮食计划
@@ -304,7 +334,7 @@ class DietPlanningAgent {
 
   // 获取餐食模板
   private getMealTemplates(mealType: string, dietaryRestrictions: string[], allergies: string[]): Meal[] {
-    // 这里应该是一个完整的餐食数据库，为了演示简化处理
+    // 餐食数据库
     const allMeals: Meal[] = [
       // 早餐
       {
@@ -323,6 +353,14 @@ class DietPlanningAgent {
         prepTime: 15,
         instructions: ['煎蛋', '烤面包', '切牛油果和番茄', '组合装盘'],
       },
+      {
+        name: '豆浆配全麦面包',
+        type: 'breakfast',
+        ingredients: ['豆浆', '全麦面包', '花生酱', '香蕉'],
+        nutrition: { calories: 380, protein: 15, carbs: 55, fat: 12, fiber: 7 },
+        prepTime: 8,
+        instructions: ['热豆浆', '涂抹花生酱在面包上', '切片香蕉装饰'],
+      },
       // 午餐
       {
         name: '鸡胸肉沙拉',
@@ -340,6 +378,14 @@ class DietPlanningAgent {
         prepTime: 25,
         instructions: ['蒸煮糙米', '烤制三文鱼', '蒸蔬菜', '搭配装盘'],
       },
+      {
+        name: '豆腐蔬菜炒饭',
+        type: 'lunch',
+        ingredients: ['豆腐', '糙米', '胡萝卜', '豌豆', '生抽'],
+        nutrition: { calories: 420, protein: 18, carbs: 60, fat: 12, fiber: 8 },
+        prepTime: 18,
+        instructions: ['炒制豆腐块', '加入蔬菜翻炒', '加入米饭炒匀', '调味装盘'],
+      },
       // 晚餐
       {
         name: '蔬菜炒面',
@@ -349,6 +395,22 @@ class DietPlanningAgent {
         prepTime: 20,
         instructions: ['煮面条', '炒制蔬菜和豆腐', '调味拌炒', '装盘食用'],
       },
+      {
+        name: '蒸蛋羹配蔬菜',
+        type: 'dinner',
+        ingredients: ['鸡蛋', '牛奶', '西兰花', '胡萝卜', '香菇'],
+        nutrition: { calories: 280, protein: 20, carbs: 15, fat: 16, fiber: 4 },
+        prepTime: 25,
+        instructions: ['制作蒸蛋羹', '蒸制蔬菜', '摆盘装饰'],
+      },
+      {
+        name: '素食汤面',
+        type: 'dinner',
+        ingredients: ['全麦面条', '白菜', '豆腐', '香菇', '紫菜'],
+        nutrition: { calories: 350, protein: 15, carbs: 55, fat: 8, fiber: 6 },
+        prepTime: 22,
+        instructions: ['煮制面条', '制作蔬菜汤', '组合装碗'],
+      },
       // 零食
       {
         name: '坚果酸奶',
@@ -357,6 +419,22 @@ class DietPlanningAgent {
         nutrition: { calories: 200, protein: 10, carbs: 15, fat: 12, fiber: 3 },
         prepTime: 5,
         instructions: ['在酸奶中加入坚果', '淋上少量蜂蜜即可'],
+      },
+      {
+        name: '水果拼盘',
+        type: 'snack',
+        ingredients: ['苹果', '香蕉', '橙子', '葡萄'],
+        nutrition: { calories: 150, protein: 2, carbs: 38, fat: 1, fiber: 6 },
+        prepTime: 5,
+        instructions: ['清洗水果', '切片装盘'],
+      },
+      {
+        name: '全麦饼干配茶',
+        type: 'snack',
+        ingredients: ['全麦饼干', '绿茶'],
+        nutrition: { calories: 120, protein: 3, carbs: 22, fat: 3, fiber: 3 },
+        prepTime: 3,
+        instructions: ['泡制绿茶', '搭配全麦饼干'],
       },
     ];
 
@@ -374,14 +452,14 @@ class DietPlanningAgent {
       }
 
       // 检查饮食限制
-      if (dietaryRestrictions.includes('vegetarian')) {
+      if (dietaryRestrictions.includes('素食主义')) {
         const meatIngredients = ['鸡胸肉', '三文鱼', '鸡蛋'];
         if (meal.ingredients.some(ingredient => meatIngredients.includes(ingredient))) {
           return false;
         }
       }
 
-      if (dietaryRestrictions.includes('vegan')) {
+      if (dietaryRestrictions.includes('严格素食主义')) {
         const animalProducts = ['鸡胸肉', '三文鱼', '鸡蛋', '牛奶', '酸奶', '蜂蜜'];
         if (meal.ingredients.some(ingredient => animalProducts.includes(ingredient))) {
           return false;
@@ -400,7 +478,13 @@ class DietPlanningAgent {
         name: '自定义餐食',
         type: 'breakfast',
         ingredients: ['请根据您的限制条件自行准备'],
-        nutrition: { calories: targetCalories, protein: targetCalories * 0.15 / 4, carbs: targetCalories * 0.55 / 4, fat: targetCalories * 0.30 / 9, fiber: 25 },
+        nutrition: { 
+          calories: targetCalories, 
+          protein: Math.round(targetCalories * 0.15 / 4), 
+          carbs: Math.round(targetCalories * 0.55 / 4), 
+          fat: Math.round(targetCalories * 0.30 / 9), 
+          fiber: 25 
+        },
         prepTime: 0,
         instructions: ['根据营养需求自行准备餐食'],
       };
@@ -439,22 +523,55 @@ class DietPlanningAgent {
 
   // 启动 Agent
   public async start() {
-    console.log('饮食规划 Agent 已启动!');
-    return this.mastra;
+    try {
+      console.log('饮食规划 Agent 启动中...');
+      console.log('Agent 已成功启动!');
+      return this.mastra;
+    } catch (error) {
+      console.error('启动 Agent 失败:', error);
+      throw error;
+    }
   }
 
   // 处理用户消息
   public async handleUserMessage(userId: string, message: string) {
-    const agent = this.mastra.getAgent('dietPlanningAgent');
-    if (!agent) {
-      throw new Error('Agent 未找到');
+    try {
+      const agent = this.mastra.getAgent('dietPlanningAgent');
+      if (!agent) {
+        throw new Error('Agent 未找到');
+      }
+
+      console.log(`处理用户 ${userId} 的消息: ${message}`);
+      
+      // 如果没有 API Key，返回模拟响应
+      if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY === 'demo-key') {
+        return this.generateMockResponse(message);
+      }
+
+      const response = await agent.generate([{ role: 'user', content: message }], {
+        userId,
+      });
+
+      return response;
+    } catch (error) {
+      console.error('处理用户消息时出错:', error);
+      return '抱歉，处理您的请求时遇到了问题。请稍后再试。';
     }
+  }
 
-    const response = await agent.generate([{ role: 'user', content: message }], {
-      userId,
-    });
-
-    return response;
+  // 生成模拟响应（用于演示）
+  private generateMockResponse(message: string): string {
+    if (message.includes('BMR') || message.includes('基础代谢')) {
+      return '我可以帮您计算基础代谢率！请提供您的年龄、性别、体重、身高和活动水平信息。';
+    } else if (message.includes('饮食计划') || message.includes('meal plan')) {
+      return '我将为您制定个性化的饮食计划。首先需要了解您的基本信息和健康目标。请告诉我您的年龄、体重、身高、活动水平以及任何饮食限制。';
+    } else if (message.includes('减重') || message.includes('减肥')) {
+      return '减重需要创造热量赤字。我建议适当降低热量摄入，增加蛋白质比例，并结合规律运动。让我为您制定一个科学的减重饮食计划。';
+    } else if (message.includes('增肌')) {
+      return '增肌需要充足的蛋白质和适当的热量盈余。建议每公斤体重摄入1.6-2.2克蛋白质，并在训练后及时补充营养。';
+    } else {
+      return '您好！我是AI营养师，可以帮您制定个性化的饮食计划、计算营养需求、提供健康饮食建议。请告诉我您需要什么帮助？';
+    }
   }
 }
 
@@ -463,25 +580,19 @@ export { DietPlanningAgent };
 
 // 使用示例
 async function main() {
-  const dietAgent = new DietPlanningAgent();
-  await dietAgent.start();
+  try {
+    const dietAgent = new DietPlanningAgent();
+    await dietAgent.start();
 
-  // 示例：设置用户偏好
-  const userPreferences: UserPreferences = {
-    age: 30,
-    gender: 'female',
-    weight: 65,
-    height: 165,
-    activityLevel: 'moderate',
-    dietaryRestrictions: [],
-    healthGoals: ['减重', '增加肌肉'],
-    allergies: [],
-  };
+    // 示例对话
+    const response1 = await dietAgent.handleUserMessage('user123', '我想要一个7天的饮食计划');
+    console.log('AI回复:', response1);
+  } catch (error) {
+    console.error('运行示例时出错:', error);
+  }
+}
 
-  // 处理用户交互
-  console.log('Agent 准备就绪，可以开始对话...');
-  
-  // 示例对话
-  const response1 = await dietAgent.handleUserMessage('user123', '我想要一个7天的饮食计划');
-  console.log('AI回复:', response1);
+// 如果直接运行此文件，执行示例
+if (require.main === module) {
+  main();
 }
