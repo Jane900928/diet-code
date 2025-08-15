@@ -1,3 +1,6 @@
+// 禁用 Mastra 遥测警告
+globalThis.___MASTRA_TELEMETRY___ = true;
+
 // 安装依赖
 // npm install @mastra/core @mastra/memory dotenv
 
@@ -61,6 +64,10 @@ class DietPlanningAgent {
           apiKey: process.env.OPENAI_API_KEY,
         },
       },
+      // 禁用遥测功能
+      telemetry: {
+        enabled: false
+      }
     });
 
     this.memoryManager = new MemoryManager({
